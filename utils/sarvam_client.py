@@ -111,7 +111,7 @@ class SarvamClient:
         self,
         text: str,
         language: str = "hi-IN",
-        speaker: str = "meera",
+        speaker: str = "shubh",
     ) -> Optional[bytes]:
         """Convert text to speech using Sarvam TTS API."""
         self.last_tts_error = ""
@@ -121,23 +121,21 @@ class SarvamClient:
             self.last_tts_error = "No text available for TTS."
             return None
 
-        clipped_text = cleaned_text[:450]
-        sample_rates = [22050, 16000, 8000]
-        speaker_options = [speaker, None]
+        clipped_text = cleaned_text[:900]
+        sample_rates = [24000, 22050, 16000, 8000]
+        speaker_value = (speaker or "shubh").strip().lower()
+        speaker_options = [speaker_value, None]
         last_error = ""
 
         with httpx.Client(timeout=30) as client:
             for sample_rate in sample_rates:
                 for speaker_option in speaker_options:
                     payload = {
-                        "inputs": [clipped_text],
+                        "text": clipped_text,
                         "target_language_code": language,
-                        "pitch": 0,
                         "pace": 1.0,
-                        "loudness": 1.5,
                         "speech_sample_rate": sample_rate,
-                        "enable_preprocessing": True,
-                        "model": "bulbul:v1",
+                        "model": "bulbul:v3",
                     }
                     if speaker_option:
                         payload["speaker"] = speaker_option
@@ -162,6 +160,9 @@ class SarvamClient:
                             last_error = "TTS response did not include a base64 audio payload."
                         else:
                             last_error = f"TTS response did not include audio for sample_rate={sample_rate}."
+                    except httpx.HTTPStatusError as exc:
+                        response_text = exc.response.text[:300] if exc.response is not None else ""
+                        last_error = f"HTTP {exc.response.status_code if exc.response else 'error'}: {response_text or str(exc)}"
                     except Exception as exc:
                         last_error = str(exc)
 
