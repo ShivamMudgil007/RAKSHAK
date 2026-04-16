@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import re
 from html import escape
 import requests
 from datetime import datetime
@@ -423,11 +424,34 @@ def build_user_message(text_query: str, transcript: str) -> str:
     return text_query
 
 
+def sanitize_text_for_tts(text: str, limit: int = 450) -> tuple[str, bool]:
+    """Convert markdown-heavy assistant text into plain speech-friendly text."""
+    cleaned = text.replace("\r", "\n")
+    cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+    cleaned = re.sub(r"^[#>\-\*\u2022]+\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if len(cleaned) <= limit:
+        return cleaned, False
+
+    truncated = cleaned[:limit].rsplit(" ", 1)[0].strip()
+    if truncated and truncated[-1] not in ".!?":
+        truncated += "."
+    return truncated, True
+
+
 def generate_audio_reply(text: str, language: str) -> dict | None:
     """Generate audio for assistant output."""
     from utils.sarvam_client import sarvam_client
 
-    audio_bytes = sarvam_client.text_to_speech(text, language, "meera")
+    tts_text, truncated = sanitize_text_for_tts(text)
+    if not tts_text:
+        return None
+
+    audio_bytes = sarvam_client.text_to_speech(tts_text, language, "meera")
     if not audio_bytes:
         return None
 
@@ -435,6 +459,8 @@ def generate_audio_reply(text: str, language: str) -> dict | None:
         "bytes": audio_bytes,
         "format": detect_audio_mime(audio_bytes),
         "language": language,
+        "preview_text": tts_text,
+        "truncated": truncated,
     }
 
 
@@ -1011,7 +1037,7 @@ with tab3:
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
     st.markdown("""
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72rem; color:#7f8c8d; margin-bottom:0.75rem;">
-        Submit a typed query, upload a short audio message, or use both. Responses always come back as text, with an optional audio reply.
+        Submit a typed query, record audio with your microphone, upload audio, or use both. Responses come back as text, with an optional generated audio reply.
     </div>
     """, unsafe_allow_html=True)
     col_ci, col_cb = st.columns([5, 1])
@@ -1025,31 +1051,44 @@ with tab3:
     with col_cb:
         send_btn = st.button("SEND ▶", use_container_width=True)
 
-    audio_query = st.file_uploader(
-        "Audio Query",
-        type=["wav", "mp3", "ogg", "flac", "aac", "m4a", "webm"],
-        help="Upload a short audio query for transcription.",
-        key="audio_query_file",
-    )
-    if audio_query is not None:
-        st.audio(audio_query.getvalue(), format=audio_query.type or "audio/wav")
+    record_col, upload_col = st.columns(2)
+    with record_col:
+        recorded_query = st.audio_input(
+            "Record Audio Query",
+            help="Record a short audio query directly from your microphone.",
+            key="audio_query_recording",
+        )
+        if recorded_query is not None:
+            st.audio(recorded_query.getvalue(), format=recorded_query.type or "audio/wav")
+
+    with upload_col:
+        audio_query = st.file_uploader(
+            "Upload Audio Query",
+            type=["wav", "mp3", "ogg", "flac", "aac", "m4a", "webm"],
+            help="Upload a short audio query for transcription.",
+            key="audio_query_file",
+        )
+        if audio_query is not None:
+            st.audio(audio_query.getvalue(), format=audio_query.type or "audio/wav")
 
     generate_audio_output = st.checkbox("Generate audio reply for the assistant response", value=False)
     if generate_audio_output and not can_generate_audio(language):
         st.caption("Audio reply is currently available for English, Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Odia, Punjabi, Tamil, and Telugu.")
 
-    if send_btn and (chat_input.strip() or audio_query is not None):
+    selected_audio_query = recorded_query or audio_query
+
+    if send_btn and (chat_input.strip() or selected_audio_query is not None):
         from utils.sarvam_client import sarvam_client
 
         transcript = ""
         effective_query = chat_input.strip()
 
-        if audio_query is not None:
+        if selected_audio_query is not None:
             with st.spinner("Transcribing audio query..."):
                 transcription = sarvam_client.speech_to_text(
-                    audio_bytes=audio_query.getvalue(),
-                    filename=audio_query.name,
-                    mime_type=audio_query.type or "application/octet-stream",
+                    audio_bytes=selected_audio_query.getvalue(),
+                    filename=getattr(selected_audio_query, "name", "recorded_query.wav"),
+                    mime_type=getattr(selected_audio_query, "type", "application/octet-stream") or "application/octet-stream",
                 )
                 transcript = transcription.get("transcript", "").strip()
 
@@ -1115,9 +1154,18 @@ with tab3:
 
     if st.session_state.last_audio_response:
         st.markdown("""<div class="panel-header">AUDIO RESPONSE</div>""", unsafe_allow_html=True)
+        if st.session_state.last_audio_response.get("truncated"):
+            st.caption("Audio reply was generated from a shortened plain-text version of the assistant response for better TTS reliability.")
         st.audio(
             st.session_state.last_audio_response["bytes"],
             format=st.session_state.last_audio_response["format"],
+        )
+        st.download_button(
+            "Download Audio Reply",
+            data=st.session_state.last_audio_response["bytes"],
+            file_name="rakshak_response.wav",
+            mime=st.session_state.last_audio_response["format"],
+            use_container_width=True,
         )
 
 # ── TAB 4: Knowledge Base ─────────────────────────────────────────────────────
