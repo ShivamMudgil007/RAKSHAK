@@ -451,7 +451,7 @@ def generate_audio_reply(text: str, language: str) -> dict | None:
     if not tts_text:
         return None
 
-    audio_bytes = sarvam_client.text_to_speech(tts_text, language, "meera")
+    audio_bytes = sarvam_client.text_to_speech(tts_text, language, "shubh")
     if not audio_bytes:
         return None
 
@@ -506,9 +506,79 @@ TTS_SUPPORTED_LANGUAGES = {
 }
 
 
+LANGUAGE_NAME_BY_CODE = {code: label for label, code in SARVAM_LANGUAGE_OPTIONS.items()}
+
+
 def can_generate_audio(language: str) -> bool:
     """Return True when Sarvam TTS supports the selected language."""
     return language in TTS_SUPPORTED_LANGUAGES
+
+
+def display_language_name(language_code: str) -> str:
+    """Return a friendly label for a Sarvam language code."""
+    return LANGUAGE_NAME_BY_CODE.get(language_code, language_code or "Unknown")
+
+
+def detect_language_from_text_heuristic(text: str) -> str | None:
+    """Infer Indic language from Unicode script when possible."""
+    script_ranges = [
+        ((0x0900, 0x097F), "hi-IN"),   # Devanagari
+        ((0x0980, 0x09FF), "bn-IN"),   # Bengali / Assamese
+        ((0x0A00, 0x0A7F), "pa-IN"),   # Gurmukhi
+        ((0x0A80, 0x0AFF), "gu-IN"),   # Gujarati
+        ((0x0B00, 0x0B7F), "od-IN"),   # Odia
+        ((0x0B80, 0x0BFF), "ta-IN"),   # Tamil
+        ((0x0C00, 0x0C7F), "te-IN"),   # Telugu
+        ((0x0C80, 0x0CFF), "kn-IN"),   # Kannada
+        ((0x0D00, 0x0D7F), "ml-IN"),   # Malayalam
+        ((0x0600, 0x06FF), "ur-IN"),   # Urdu / Arabic script
+    ]
+
+    counts: dict[str, int] = {}
+    for char in text:
+        codepoint = ord(char)
+        for (start, end), language_code in script_ranges:
+            if start <= codepoint <= end:
+                counts[language_code] = counts.get(language_code, 0) + 1
+                break
+
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
+def resolve_response_language(
+    typed_query: str,
+    transcript: str,
+    transcript_language: str,
+    selected_language: str,
+) -> str:
+    """Choose the response language from the user's actual input, not just the sidebar."""
+    from utils.sarvam_client import sarvam_client
+
+    supported_codes = set(SARVAM_LANGUAGE_OPTIONS.values())
+    transcript_language = (transcript_language or "").strip()
+
+    if typed_query.strip():
+        heuristic_language = detect_language_from_text_heuristic(typed_query.strip())
+        if heuristic_language in supported_codes:
+            return heuristic_language
+        detected_language = sarvam_client.detect_language(typed_query.strip()).strip()
+        if detected_language in supported_codes:
+            return detected_language
+
+    if transcript_language in supported_codes and transcript_language != "unknown":
+        return transcript_language
+
+    if transcript.strip():
+        heuristic_language = detect_language_from_text_heuristic(transcript.strip())
+        if heuristic_language in supported_codes:
+            return heuristic_language
+        detected_language = sarvam_client.detect_language(transcript.strip()).strip()
+        if detected_language in supported_codes:
+            return detected_language
+
+    return selected_language
 
 
 def run_pipeline(query: str, region: str, language: str, disaster_type: str) -> dict:
@@ -585,6 +655,8 @@ if "last_audio_response" not in st.session_state:
     st.session_state.last_audio_response = None
 if "last_manual_alert" not in st.session_state:
     st.session_state.last_manual_alert = None
+if "last_response_language" not in st.session_state:
+    st.session_state.last_response_language = "en-IN"
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -722,8 +794,10 @@ with tab1:
         # Run pipeline
         if analyze_btn and (query_input or st.session_state.get("sample_q")):
             actual_query = query_input or st.session_state.get("sample_q", "")
+            effective_language = resolve_response_language(actual_query, "", "", language)
+            st.session_state.last_response_language = effective_language
             with st.spinner("⚡ RAKSHAK agents analyzing..."):
-                result = run_pipeline(actual_query, region, language, disaster_type.lower())
+                result = run_pipeline(actual_query, region, effective_language, disaster_type.lower())
                 st.session_state.last_result = result
                 st.session_state.chat_history.append({"role": "user", "content": actual_query})
                 st.session_state.chat_history.append({
@@ -1082,6 +1156,7 @@ with tab3:
         from utils.sarvam_client import sarvam_client
 
         transcript = ""
+        transcript_language = ""
         effective_query = chat_input.strip()
 
         if selected_audio_query is not None:
@@ -1092,32 +1167,47 @@ with tab3:
                     mime_type=getattr(selected_audio_query, "type", "application/octet-stream") or "application/octet-stream",
                 )
                 transcript = transcription.get("transcript", "").strip()
+                transcript_language = transcription.get("language_code", "").strip()
 
             if not effective_query:
                 effective_query = transcript
 
         if effective_query:
+            effective_language = resolve_response_language(
+                chat_input,
+                transcript,
+                transcript_language,
+                language,
+            )
+            effective_language_name = display_language_name(effective_language)
+
             st.session_state.chat_history.append({
                 "role": "user",
                 "content": build_user_message(chat_input, transcript),
             })
             st.session_state.last_audio_response = None
+            st.session_state.last_response_language = effective_language
 
             with st.spinner("RAKSHAK thinking..."):
-                result = run_pipeline(effective_query, region, language, "all")
+                result = run_pipeline(effective_query, region, effective_language, "all")
                 response = result.get("final_response", "Analysis complete.")
                 st.session_state.chat_history.append({"role": "assistant", "content": response})
                 st.session_state.last_result = result
 
-            if generate_audio_output and can_generate_audio(language):
+            st.caption(f"Response language: {effective_language_name}")
+
+            if generate_audio_output and can_generate_audio(effective_language):
                 from utils.sarvam_client import sarvam_client
                 with st.spinner("Generating audio reply..."):
-                    st.session_state.last_audio_response = generate_audio_reply(response, language)
+                    st.session_state.last_audio_response = generate_audio_reply(response, effective_language)
                 if not st.session_state.last_audio_response:
                     error_detail = sarvam_client.last_tts_error or "Unknown TTS error."
                     st.warning(f"Audio reply could not be generated right now. Details: {error_detail}")
             elif generate_audio_output:
-                st.info("Text response was generated in the selected language. Audio reply is not available for that language yet.")
+                st.info(
+                    f"Text response was generated in {effective_language_name}. "
+                    f"Audio reply is not available for that language yet."
+                )
 
             st.rerun()
         else:
@@ -1145,20 +1235,23 @@ with tab3:
         if st.button("Audio Reply", use_container_width=True):
             last_resp = [m for m in st.session_state.chat_history if m["role"] == "assistant"]
             if last_resp:
-                if can_generate_audio(language):
+                response_language = st.session_state.get("last_response_language", language)
+                response_language_name = display_language_name(response_language)
+                if can_generate_audio(response_language):
                     from utils.sarvam_client import sarvam_client
                     with st.spinner("Generating audio reply..."):
-                        st.session_state.last_audio_response = generate_audio_reply(last_resp[-1]["content"], language)
+                        st.session_state.last_audio_response = generate_audio_reply(last_resp[-1]["content"], response_language)
                     if not st.session_state.last_audio_response:
                         error_detail = sarvam_client.last_tts_error or "Unknown TTS error."
                         st.warning(f"Audio reply could not be generated right now. Details: {error_detail}")
                 else:
-                    st.info("Audio reply is not available for the currently selected language yet.")
+                    st.info(f"Audio reply is not available yet for {response_language_name}.")
             else:
                 st.info("No assistant response available yet.")
 
     if st.session_state.last_audio_response:
         st.markdown("""<div class="panel-header">AUDIO RESPONSE</div>""", unsafe_allow_html=True)
+        st.caption(f"Audio language: {display_language_name(st.session_state.last_audio_response.get('language', ''))}")
         if st.session_state.last_audio_response.get("truncated"):
             st.caption("Audio reply was generated from a shortened plain-text version of the assistant response for better TTS reliability.")
         st.audio(
