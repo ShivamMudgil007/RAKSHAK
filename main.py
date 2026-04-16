@@ -68,7 +68,7 @@ class TranslateRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     language: str = "hi-IN"
-    speaker: str = "meera"
+    speaker: str = "shubh"
 
 
 def _normalize_recipients(values: List[str]) -> List[str]:
