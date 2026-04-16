@@ -461,6 +461,7 @@ def generate_audio_reply(text: str, language: str) -> dict | None:
         "language": language,
         "preview_text": tts_text,
         "truncated": truncated,
+        "error": sarvam_client.last_tts_error,
     }
 
 
@@ -1109,10 +1110,12 @@ with tab3:
                 st.session_state.last_result = result
 
             if generate_audio_output and can_generate_audio(language):
+                from utils.sarvam_client import sarvam_client
                 with st.spinner("Generating audio reply..."):
                     st.session_state.last_audio_response = generate_audio_reply(response, language)
                 if not st.session_state.last_audio_response:
-                    st.warning("Audio reply could not be generated right now.")
+                    error_detail = sarvam_client.last_tts_error or "Unknown TTS error."
+                    st.warning(f"Audio reply could not be generated right now. Details: {error_detail}")
             elif generate_audio_output:
                 st.info("Text response was generated in the selected language. Audio reply is not available for that language yet.")
 
@@ -1143,10 +1146,12 @@ with tab3:
             last_resp = [m for m in st.session_state.chat_history if m["role"] == "assistant"]
             if last_resp:
                 if can_generate_audio(language):
+                    from utils.sarvam_client import sarvam_client
                     with st.spinner("Generating audio reply..."):
                         st.session_state.last_audio_response = generate_audio_reply(last_resp[-1]["content"], language)
                     if not st.session_state.last_audio_response:
-                        st.warning("Audio reply could not be generated right now.")
+                        error_detail = sarvam_client.last_tts_error or "Unknown TTS error."
+                        st.warning(f"Audio reply could not be generated right now. Details: {error_detail}")
                 else:
                     st.info("Audio reply is not available for the currently selected language yet.")
             else:
