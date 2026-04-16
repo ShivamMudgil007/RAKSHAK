@@ -29,6 +29,7 @@ class SarvamClient:
         self.multipart_headers = {
             "api-subscription-key": SARVAM_API_KEY,
         }
+        self.last_tts_error: str = ""
 
     # ── LLM / Chat ──────────────────────────────────────────────────────────
 
@@ -113,31 +114,58 @@ class SarvamClient:
         speaker: str = "meera",
     ) -> Optional[bytes]:
         """Convert text to speech using Sarvam TTS API."""
-        try:
-            payload = {
-                "inputs": [text[:500]],  # API limit
-                "target_language_code": language,
-                "speaker": speaker,
-                "pitch": 0,
-                "pace": 1.0,
-                "loudness": 1.5,
-                "speech_sample_rate": 8000,
-                "enable_preprocessing": True,
-                "model": "bulbul:v1",
-            }
-            with httpx.Client(timeout=30) as client:
-                resp = client.post(
-                    f"{self.base_url}/text-to-speech",
-                    headers=self.headers,
-                    json=payload,
-                )
-                resp.raise_for_status()
-                audios = resp.json().get("audios", [])
-                if audios:
-                    import base64
-                    return base64.b64decode(audios[0])
-        except Exception:
-            pass
+        self.last_tts_error = ""
+
+        cleaned_text = " ".join((text or "").split()).strip()
+        if not cleaned_text:
+            self.last_tts_error = "No text available for TTS."
+            return None
+
+        clipped_text = cleaned_text[:450]
+        sample_rates = [22050, 16000, 8000]
+        speaker_options = [speaker, None]
+        last_error = ""
+
+        with httpx.Client(timeout=30) as client:
+            for sample_rate in sample_rates:
+                for speaker_option in speaker_options:
+                    payload = {
+                        "inputs": [clipped_text],
+                        "target_language_code": language,
+                        "pitch": 0,
+                        "pace": 1.0,
+                        "loudness": 1.5,
+                        "speech_sample_rate": sample_rate,
+                        "enable_preprocessing": True,
+                        "model": "bulbul:v1",
+                    }
+                    if speaker_option:
+                        payload["speaker"] = speaker_option
+
+                    try:
+                        resp = client.post(
+                            f"{self.base_url}/text-to-speech",
+                            headers=self.headers,
+                            json=payload,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        audios = data.get("audios") or []
+                        if not audios and data.get("audio"):
+                            audios = [data["audio"]]
+                        if audios:
+                            import base64
+                            audio_blob = audios[0]
+                            if isinstance(audio_blob, str):
+                                self.last_tts_error = ""
+                                return base64.b64decode(audio_blob)
+                            last_error = "TTS response did not include a base64 audio payload."
+                        else:
+                            last_error = f"TTS response did not include audio for sample_rate={sample_rate}."
+                    except Exception as exc:
+                        last_error = str(exc)
+
+        self.last_tts_error = last_error or "TTS request failed."
         return None
 
     # ── Language Detection ───────────────────────────────────────────────────
