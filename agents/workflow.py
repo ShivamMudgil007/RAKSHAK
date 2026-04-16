@@ -15,6 +15,7 @@ import operator
 class RAKSHAKState(TypedDict):
     """Shared state across all agents in the workflow."""
     query: str
+    query_english: str
     language: str
     region: str
     disaster_type: str
@@ -139,6 +140,69 @@ def get_seismic_data(region: str) -> Dict[str, Any]:
     }
 
 
+LANGUAGE_LABELS = {
+    "en-IN": "English",
+    "as-IN": "Assamese",
+    "bn-IN": "Bengali",
+    "brx-IN": "Bodo",
+    "doi-IN": "Dogri",
+    "gu-IN": "Gujarati",
+    "hi-IN": "Hindi",
+    "ks-IN": "Kashmiri",
+    "kok-IN": "Konkani",
+    "mai-IN": "Maithili",
+    "mni-IN": "Manipuri",
+    "mr-IN": "Marathi",
+    "ne-IN": "Nepali",
+    "od-IN": "Odia",
+    "pa-IN": "Punjabi",
+    "sa-IN": "Sanskrit",
+    "sat-IN": "Santali",
+    "sd-IN": "Sindhi",
+    "ta-IN": "Tamil",
+    "te-IN": "Telugu",
+    "kn-IN": "Kannada",
+    "ml-IN": "Malayalam",
+    "ur-IN": "Urdu",
+}
+
+
+def language_label(language_code: str) -> str:
+    """Return a user-friendly label for a language code."""
+    return LANGUAGE_LABELS.get(language_code, language_code or "English")
+
+
+def translate_to_english(text: str, source_language: str) -> str:
+    """Translate the user query to English for retrieval against English-only sources."""
+    if not text.strip() or source_language == "en-IN":
+        return text
+
+    try:
+        from utils.sarvam_client import sarvam_client
+
+        translated = sarvam_client.translate(text, source_language, "en-IN")
+        return translated.strip() or text
+    except Exception:
+        return text
+
+
+def translate_list_from_english(items: List[str], target_language: str) -> List[str]:
+    """Translate recommendation strings to the user's requested output language."""
+    if target_language == "en-IN":
+        return items
+
+    try:
+        from utils.sarvam_client import sarvam_client
+
+        translated_items = []
+        for item in items:
+            translated = sarvam_client.translate(item, "en-IN", target_language)
+            translated_items.append(translated.strip() or item)
+        return translated_items
+    except Exception:
+        return items
+
+
 # ── Agent Functions ───────────────────────────────────────────────────────────
 
 def weather_agent(state: RAKSHAKState) -> RAKSHAKState:
@@ -175,7 +239,7 @@ def rag_agent(state: RAKSHAKState) -> RAKSHAKState:
     """Agent: Retrieves relevant knowledge from vector DB."""
     try:
         from rag.knowledge_base import rag_kb
-        query = state.get("query", "")
+        query = state.get("query_english") or state.get("query", "")
         region = state.get("region", "")
         full_query = f"{query} {region} disaster management"
         docs = rag_kb.retrieve(full_query, top_k=3)
@@ -259,7 +323,10 @@ def synthesizer_agent(state: RAKSHAKState) -> RAKSHAKState:
         rag_ctx = state.get("rag_context", "")
         alerts = state.get("alerts", [])
         query = state.get("query", "")
+        query_english = state.get("query_english") or query
         region = state.get("region", "India")
+        output_language = state.get("language", "en-IN")
+        output_language_name = language_label(output_language)
 
         system_prompt = """You are RAKSHAK, an expert AI system for disaster management in India.
 You analyze weather, seismic, and historical data to provide actionable insights to disaster management officials.
@@ -267,10 +334,19 @@ Be precise, structured, and actionable. Use Indian context. Always provide:
 1. Situation Assessment
 2. Immediate Recommendations
 3. Resource Deployment Suggestions
-4. Proactive Warnings"""
+4. Proactive Warnings
+
+Important language rules:
+- IMD and source data are English-only source material.
+- Use the English source data as the basis for your reasoning.
+- Write the final answer only in the requested output language.
+- Do not mix English with the output language except for proper nouns, official abbreviations, and measurement units.
+- If the requested language is Hindi, the response must be in Hindi only."""
 
         context_summary = f"""
-Query: {query}
+User Query (original): {query}
+User Query for retrieval (English): {query_english}
+Output Language: {output_language_name} ({output_language})
 Region: {region}
 Weather Alert: {weather.get('alert_level', 'N/A')} | Rainfall: {weather.get('rainfall_24h', 0)}mm/24h
 Flood Risk: {weather.get('flood_risk', 'N/A')}
@@ -286,25 +362,26 @@ Knowledge Base Context:
         messages = [{"role": "user", "content": context_summary}]
         analysis = sarvam_client.chat(messages, system_prompt)
 
-        recommendations = [
+        recommendations_en = [
             "Activate district-level Emergency Operations Centers (EOC)",
             f"Pre-position NDRF teams in high-risk {region} zones",
             "Broadcast early warnings via Common Alerting Protocol (CAP)",
             "Coordinate with hospitals for mass casualty preparedness",
             "Ensure relief camp readiness with food, water, medicine stockpiles",
         ]
+        recommendations = translate_list_from_english(recommendations_en, output_language)
 
         return {
             **state,
             "analysis": analysis,
             "recommendations": recommendations,
             "final_response": analysis,
-            "messages": ["[Synthesizer] Final response generated"],
+            "messages": [f"[Synthesizer] Final response generated in {output_language_name} using English source data"],
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M IST"),
         }
 
     except Exception as e:
-        fallback = (
+        fallback_en = (
             f"RAKSHAK Analysis for {state.get('region', 'India')}:\n\n"
             f"Based on available data:\n"
             f"• Weather Alert Level: {state.get('weather_data', {}).get('alert_level', 'N/A')}\n"
@@ -312,11 +389,25 @@ Knowledge Base Context:
             f"• Seismic Zone: {state.get('seismic_data', {}).get('seismic_zone', 'N/A')}\n\n"
             f"Immediate Actions Required based on current conditions."
         )
+        output_language = state.get("language", "en-IN")
+        if output_language != "en-IN":
+            try:
+                from utils.sarvam_client import sarvam_client
+
+                fallback = sarvam_client.translate(fallback_en, "en-IN", output_language)
+            except Exception:
+                fallback = fallback_en
+        else:
+            fallback = fallback_en
+
         return {
             **state,
             "analysis": fallback,
             "final_response": fallback,
-            "recommendations": ["Monitor IMD alerts", "Activate EOC", "Pre-position NDRF"],
+            "recommendations": translate_list_from_english(
+                ["Monitor IMD alerts", "Activate EOC", "Pre-position NDRF"],
+                output_language,
+            ),
             "messages": [f"[Synthesizer] Fallback response: {e}"],
         }
 
@@ -365,8 +456,11 @@ def run_rakshak_pipeline(
     disaster_type: str = "all",
 ) -> RAKSHAKState:
     """Main entry point to run the RAKSHAK agentic pipeline."""
+    query_english = translate_to_english(query, language)
+
     initial_state = RAKSHAKState(
         query=query,
+        query_english=query_english,
         language=language,
         region=region,
         disaster_type=disaster_type,

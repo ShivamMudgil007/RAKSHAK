@@ -7,11 +7,11 @@ import os
 import sys
 import json
 from datetime import datetime
-from typing import Optional, List
+from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -51,8 +51,12 @@ class AlertRequest(BaseModel):
     region: str
     message: str
     severity: str = "HIGH"
-    channels: List[str] = ["sms", "email"]
-    recipients: List[str] = ["9310373304"]
+    channels: List[str] = Field(default_factory=lambda: ["sms", "email"])
+    recipients: List[str] = Field(default_factory=list)
+    email_recipients: List[str] = Field(default_factory=list)
+    from_email: Optional[str] = None
+    from_name: Optional[str] = None
+    send_in_background: bool = False
 
 
 class TranslateRequest(BaseModel):
@@ -67,6 +71,155 @@ class TTSRequest(BaseModel):
     speaker: str = "meera"
 
 
+def _normalize_recipients(values: List[str]) -> List[str]:
+    """Strip empty recipient entries while preserving order."""
+    seen = set()
+    normalized = []
+    for value in values:
+        item = value.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_channels(values: List[str]) -> List[str]:
+    """Normalize user-selected delivery channels."""
+    allowed = {"sms", "email"}
+    normalized = []
+    for value in values:
+        channel = value.strip().lower()
+        if channel in allowed and channel not in normalized:
+            normalized.append(channel)
+    return normalized
+
+
+def _delivery_summary(channel_results: Dict[str, List[dict]]) -> Dict[str, dict]:
+    """Summarize per-channel delivery attempts."""
+    summary: Dict[str, dict] = {}
+    for channel, results in channel_results.items():
+        sent = sum(1 for item in results if item.get("status") == "sent")
+        failed = sum(1 for item in results if item.get("status") == "failed")
+        summary[channel] = {
+            "attempted": len(results),
+            "sent": sent,
+            "failed": failed,
+        }
+    return summary
+
+
+def alert_channel_configuration() -> Dict[str, dict]:
+    """Expose non-secret alert configuration state for the UI and API."""
+    from utils.email_client import email_client
+    from utils.twilio_client import twilio_sms
+
+    return {
+        "sms": {
+            "configured": twilio_sms.is_configured(),
+            "has_from_number": bool(twilio_sms.from_number),
+            "has_messaging_service_sid": bool(twilio_sms.messaging_service_sid),
+        },
+        "email": {
+            "configured": email_client.is_configured(),
+            "host": email_client.host,
+            "port": email_client.port,
+            "use_tls": email_client.use_tls,
+            "use_ssl": email_client.use_ssl,
+            "default_sender": email_client.sender_identity(),
+        },
+    }
+
+
+def dispatch_alert_delivery(
+    region: str,
+    message: str,
+    severity: str,
+    channels: List[str],
+    recipients: List[str],
+    email_recipients: List[str],
+    from_email: Optional[str] = None,
+    from_name: Optional[str] = None,
+) -> Dict[str, object]:
+    """Dispatch an alert immediately and return structured delivery results."""
+    from utils.email_client import email_client
+    from utils.twilio_client import twilio_sms
+
+    normalized_channels = _normalize_channels(channels)
+    sms_recipients = _normalize_recipients(recipients)
+    explicit_email_recipients = _normalize_recipients(email_recipients)
+    derived_email_recipients = _normalize_recipients(
+        [recipient for recipient in sms_recipients if "@" in recipient]
+    )
+    final_email_recipients = explicit_email_recipients or derived_email_recipients
+
+    if not normalized_channels:
+        raise ValueError("Select at least one delivery channel: sms or email.")
+
+    alert_text = f"[RAKSHAK {severity}] {region}: {message}"
+    email_subject = f"RAKSHAK {severity} Alert - {region}"
+    email_body = (
+        f"RAKSHAK Emergency Alert\n\n"
+        f"Region: {region}\n"
+        f"Severity: {severity}\n"
+        f"Message: {message}\n"
+        f"Timestamp: {datetime.now().isoformat()}\n"
+    )
+
+    channel_results: Dict[str, List[dict]] = {}
+    channel_status: Dict[str, str] = {}
+
+    if "sms" in normalized_channels:
+        if not sms_recipients:
+            channel_status["sms"] = "no_recipients_provided"
+        elif not twilio_sms.is_configured():
+            channel_status["sms"] = "twilio_not_configured"
+        else:
+            channel_results["sms"] = twilio_sms.send_bulk_sms(sms_recipients, alert_text)
+            channel_status["sms"] = "dispatched"
+
+    if "email" in normalized_channels:
+        if not final_email_recipients:
+            channel_status["email"] = "no_recipients_provided"
+        elif not email_client.is_configured():
+            channel_status["email"] = "smtp_not_configured"
+        else:
+            channel_results["email"] = email_client.send_bulk_email(
+                final_email_recipients,
+                email_subject,
+                email_body,
+                from_email=from_email,
+                from_name=from_name,
+            )
+            channel_status["email"] = "dispatched"
+
+    any_sent = any(
+        result.get("status") == "sent"
+        for results in channel_results.values()
+        for result in results
+    )
+
+    return {
+        "status": "sent" if any_sent else "skipped",
+        "region": region,
+        "severity": severity,
+        "channels": normalized_channels,
+        "message": message,
+        "recipients": {
+            "sms": sms_recipients,
+            "email": final_email_recipients,
+        },
+        "channel_status": channel_status,
+        "results": channel_results,
+        "summary": _delivery_summary(channel_results),
+        "sender": {
+            "from_email": from_email,
+            "from_name": from_name,
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -77,13 +230,23 @@ def root():
         "version": "1.0.0",
         "status": "operational",
         "timestamp": datetime.now().isoformat(),
-        "endpoints": ["/query", "/alerts", "/weather", "/seismic", "/translate", "/tts", "/health"],
+        "endpoints": ["/query", "/alerts", "/weather", "/seismic", "/translate", "/tts", "/health", "/alert-config", "/send-alert"],
     }
 
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/alert-config")
+def get_alert_config():
+    """Expose whether SMS and email channels are ready without returning secrets."""
+    return {
+        "status": "success",
+        "channels": alert_channel_configuration(),
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @app.post("/query")
@@ -121,6 +284,7 @@ def query_rakshak(req: QueryRequest):
                 for d in result.get("retrieved_docs", [])
             ],
             "agent_trace": result.get("messages", []),
+            "auto_dispatch_status": auto_sms_status,
             "auto_sms_status": auto_sms_status,
             "timestamp": result.get("timestamp", datetime.now().isoformat()),
         }
@@ -187,17 +351,51 @@ def text_to_speech(req: TTSRequest):
 @app.post("/send-alert")
 async def send_alert(req: AlertRequest, background_tasks: BackgroundTasks):
     """Send emergency alerts via SMS/Email."""
-    background_tasks.add_task(
-        _dispatch_alert, req.region, req.message, req.severity, req.channels, req.recipients
-    )
-    return {
-        "status": "dispatched",
-        "region": req.region,
-        "severity": req.severity,
-        "channels": req.channels,
-        "recipients": req.recipients,
-        "message": "Alert queued for delivery",
-    }
+    try:
+        if req.send_in_background:
+            background_tasks.add_task(
+                _dispatch_alert,
+                req.region,
+                req.message,
+                req.severity,
+                req.channels,
+                req.recipients,
+                req.email_recipients,
+                req.from_email,
+                req.from_name,
+            )
+            return {
+                "status": "queued",
+                "region": req.region,
+                "severity": req.severity,
+                "channels": _normalize_channels(req.channels),
+                "recipients": {
+                    "sms": _normalize_recipients(req.recipients),
+                    "email": _normalize_recipients(req.email_recipients),
+                },
+                "sender": {
+                    "from_email": req.from_email,
+                    "from_name": req.from_name,
+                },
+                "config": alert_channel_configuration(),
+                "message": "Alert queued for background delivery",
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        return dispatch_alert_delivery(
+            req.region,
+            req.message,
+            req.severity,
+            req.channels,
+            req.recipients,
+            req.email_recipients,
+            req.from_email,
+            req.from_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 def _dispatch_alert(
@@ -206,29 +404,35 @@ def _dispatch_alert(
     severity: str,
     channels: List[str],
     recipients: List[str],
+    email_recipients: List[str],
+    from_email: Optional[str] = None,
+    from_name: Optional[str] = None,
 ):
     """Background task to dispatch alerts."""
+    delivery = dispatch_alert_delivery(
+        region,
+        message,
+        severity,
+        channels,
+        recipients,
+        email_recipients,
+        from_email,
+        from_name,
+    )
+
     print(f"[ALERT DISPATCH] Region: {region} | Severity: {severity}")
-    print(f"[ALERT DISPATCH] Message: {message}")
-    print(f"[ALERT DISPATCH] Channels: {channels}")
-    print(f"[ALERT DISPATCH] Recipients: {recipients}")
+    print(f"[ALERT DISPATCH] Channels: {delivery['channels']}")
+    print(f"[ALERT DISPATCH] Summary: {delivery['summary']}")
 
-    alert_text = f"[RAKSHAK {severity}] {region}: {message}"
+    for channel, status in delivery["channel_status"].items():
+        print(f"[ALERT DISPATCH] {channel.upper()} status={status}")
 
-    if "sms" in channels:
-        from utils.twilio_client import twilio_sms
-
-        if not recipients:
-            print("[TWILIO SMS] No recipients provided. Skipping SMS dispatch.")
-        elif not twilio_sms.is_configured():
-            print("[TWILIO SMS] Twilio is not configured. Check environment variables and dependency.")
-        else:
-            results = twilio_sms.send_bulk_sms(recipients, alert_text)
-            for result in results:
-                if result["status"] == "sent":
-                    print(f"[TWILIO SMS SENT] To={result['to']} | SID={result['sid']}")
-                else:
-                    print(f"[TWILIO SMS FAILED] To={result['to']} | Error={result['error']}")
+    for channel, results in delivery["results"].items():
+        for result in results:
+            if result["status"] == "sent":
+                print(f"[{channel.upper()} SENT] To={result['to']}")
+            else:
+                print(f"[{channel.upper()} FAILED] To={result['to']} | Error={result['error']}")
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────

@@ -210,3 +210,48 @@ Never commit API keys to version control. Use environment variables or secrets m
 - ✅ Visualization: Risk maps and trend charts
 - ✅ API-first: FastAPI backend for integration
 - 🔄 Self-improving: Feedback loop for model refinement (roadmap)
+
+## Email Alert Configuration
+
+Set these environment variables to enable email delivery for `/send-alert` and automatic RED alerts:
+
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `SMTP_FROM_EMAIL`
+- `SMTP_FROM_NAME`
+- `SMTP_USE_TLS=true`
+- `SMTP_USE_SSL=false`
+- `AUTO_EMAIL_ON_RED=true`
+- `ALERT_EMAIL_RECIPIENTS=ops@example.com,admin@example.com`
+
+For manual `/send-alert` requests, you can also override the sender per request with:
+
+- `from_email`
+- `from_name`
+
+Example payload:
+
+```json
+{
+  "region": "Delhi",
+  "message": "Heavy rainfall expected. Keep emergency teams on standby.",
+  "severity": "HIGH",
+  "channels": ["email"],
+  "email_recipients": ["ops@example.com"],
+  "from_email": "alerts@yourdomain.com",
+  "from_name": "RAKSHAK Control Room"
+}
+```
+
+To set this up for you, the minimum email fields needed are:
+
+- SMTP host
+- SMTP port
+- SMTP username
+- SMTP password or app password
+- sender email address (`SMTP_FROM_EMAIL`)
+- sender display name (`SMTP_FROM_NAME`, optional but recommended)
+- whether your provider uses TLS or SSL
+- recipient email addresses for auto RED alerts, if you want them enabled

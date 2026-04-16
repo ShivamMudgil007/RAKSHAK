@@ -90,7 +90,7 @@ class SarvamClient:
                 "target_language_code": target_lang,
                 "speaker_gender": "Female",
                 "mode": "formal",
-                "model": "mayura:v1",
+                "model": "sarvam-translate:v1",
                 "enable_preprocessing": True,
             }
             with httpx.Client(timeout=20) as client:

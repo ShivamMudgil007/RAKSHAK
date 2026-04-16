@@ -438,6 +438,52 @@ def generate_audio_reply(text: str, language: str) -> dict | None:
     }
 
 
+SARVAM_LANGUAGE_OPTIONS = {
+    "English": "en-IN",
+    "Assamese": "as-IN",
+    "Bengali": "bn-IN",
+    "Bodo": "brx-IN",
+    "Dogri": "doi-IN",
+    "Gujarati": "gu-IN",
+    "Hindi": "hi-IN",
+    "Kannada": "kn-IN",
+    "Kashmiri": "ks-IN",
+    "Konkani": "kok-IN",
+    "Maithili": "mai-IN",
+    "Malayalam": "ml-IN",
+    "Manipuri": "mni-IN",
+    "Marathi": "mr-IN",
+    "Nepali": "ne-IN",
+    "Odia": "od-IN",
+    "Punjabi": "pa-IN",
+    "Sanskrit": "sa-IN",
+    "Santali": "sat-IN",
+    "Sindhi": "sd-IN",
+    "Tamil": "ta-IN",
+    "Telugu": "te-IN",
+    "Urdu": "ur-IN",
+}
+
+TTS_SUPPORTED_LANGUAGES = {
+    "en-IN",
+    "bn-IN",
+    "gu-IN",
+    "hi-IN",
+    "kn-IN",
+    "ml-IN",
+    "mr-IN",
+    "od-IN",
+    "pa-IN",
+    "ta-IN",
+    "te-IN",
+}
+
+
+def can_generate_audio(language: str) -> bool:
+    """Return True when Sarvam TTS supports the selected language."""
+    return language in TTS_SUPPORTED_LANGUAGES
+
+
 def run_pipeline(query: str, region: str, language: str, disaster_type: str) -> dict:
     """Run the RAKSHAK pipeline (direct or via API)."""
     try:
@@ -460,6 +506,46 @@ def run_pipeline(query: str, region: str, language: str, disaster_type: str) -> 
         }
 
 
+def parse_recipient_input(raw_text: str) -> list[str]:
+    """Parse comma or newline separated recipients."""
+    values = []
+    for chunk in raw_text.replace("\r", "\n").split("\n"):
+        values.extend(item.strip() for item in chunk.split(","))
+    return [item for item in values if item]
+
+
+def get_alert_channel_status() -> dict:
+    """Load non-secret alert channel readiness details."""
+    from main import alert_channel_configuration
+
+    return alert_channel_configuration()
+
+
+def send_manual_alert(
+    region: str,
+    message: str,
+    severity: str,
+    channels: list[str],
+    sms_recipients: list[str],
+    email_recipients: list[str],
+    from_email: str,
+    from_name: str,
+) -> dict:
+    """Send a manual alert and return structured results."""
+    from main import dispatch_alert_delivery
+
+    return dispatch_alert_delivery(
+        region=region,
+        message=message,
+        severity=severity,
+        channels=channels,
+        recipients=sms_recipients,
+        email_recipients=email_recipients,
+        from_email=from_email.strip() or None,
+        from_name=from_name.strip() or None,
+    )
+
+
 # ── Session State Init ────────────────────────────────────────────────────────
 
 if "chat_history" not in st.session_state:
@@ -470,6 +556,8 @@ if "selected_region" not in st.session_state:
     st.session_state.selected_region = "Kerala"
 if "last_audio_response" not in st.session_state:
     st.session_state.last_audio_response = None
+if "last_manual_alert" not in st.session_state:
+    st.session_state.last_manual_alert = None
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -532,17 +620,8 @@ with st.sidebar:
     )
 
     st.markdown("**LANGUAGE**")
-    lang_map = {
-        "English": "en-IN",
-        "Hindi (हिंदी)": "hi-IN",
-        "Tamil (தமிழ்)": "ta-IN",
-        "Telugu (తెలుగు)": "te-IN",
-        "Kannada (ಕನ್ನಡ)": "kn-IN",
-        "Malayalam (മലയാളം)": "ml-IN",
-        "Bengali (বাংলা)": "bn-IN",
-    }
-    language_label = st.selectbox("Language", list(lang_map.keys()), label_visibility="collapsed")
-    language = lang_map[language_label]
+    language_label = st.selectbox("Language", list(SARVAM_LANGUAGE_OPTIONS.keys()), label_visibility="collapsed")
+    language = SARVAM_LANGUAGE_OPTIONS[language_label]
 
     st.markdown("---")
 
@@ -568,11 +647,12 @@ with st.sidebar:
 
 # ── Main Tabs ─────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📡  INTELLIGENCE HUB",
     "🗺️  RISK MAP",
     "💬  AI ASSISTANT",
     "📋  KNOWLEDGE BASE",
+    "🚨  ALERT CENTER",
 ])
 
 
@@ -646,10 +726,10 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
 
-            auto_sms_status = result.get("auto_sms_status", [])
-            if auto_sms_status:
-                with st.expander("SMS Dispatch Status"):
-                    for item in auto_sms_status:
+            auto_dispatch_status = result.get("auto_dispatch_status", result.get("auto_sms_status", []))
+            if auto_dispatch_status:
+                with st.expander("Alert Dispatch Status"):
+                    for item in auto_dispatch_status:
                         st.write(item)
 
             # Analysis
@@ -955,6 +1035,8 @@ with tab3:
         st.audio(audio_query.getvalue(), format=audio_query.type or "audio/wav")
 
     generate_audio_output = st.checkbox("Generate audio reply for the assistant response", value=False)
+    if generate_audio_output and not can_generate_audio(language):
+        st.caption("Audio reply is currently available for English, Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Odia, Punjabi, Tamil, and Telugu.")
 
     if send_btn and (chat_input.strip() or audio_query is not None):
         from utils.sarvam_client import sarvam_client
@@ -987,11 +1069,13 @@ with tab3:
                 st.session_state.chat_history.append({"role": "assistant", "content": response})
                 st.session_state.last_result = result
 
-            if generate_audio_output:
+            if generate_audio_output and can_generate_audio(language):
                 with st.spinner("Generating audio reply..."):
                     st.session_state.last_audio_response = generate_audio_reply(response, language)
                 if not st.session_state.last_audio_response:
                     st.warning("Audio reply could not be generated right now.")
+            elif generate_audio_output:
+                st.info("Text response was generated in the selected language. Audio reply is not available for that language yet.")
 
             st.rerun()
         else:
@@ -1009,16 +1093,23 @@ with tab3:
                 last_resp = [m for m in st.session_state.chat_history if m["role"] == "assistant"]
                 if last_resp:
                     from utils.sarvam_client import sarvam_client
-                    translated = sarvam_client.translate(last_resp[-1]["content"][:500], "en-IN", language)
-                    st.info(f"**Translated ({language_label}):** {translated}")
+                    source_text = last_resp[-1]["content"][:500]
+                    translated = sarvam_client.translate(source_text, "auto", language)
+                    if translated.strip() == source_text.strip():
+                        st.info(f"The last response may already be in {language_label}, or translation is unavailable right now.")
+                    else:
+                        st.info(f"**Translated ({language_label}):** {translated}")
     with col_cc3:
         if st.button("Audio Reply", use_container_width=True):
             last_resp = [m for m in st.session_state.chat_history if m["role"] == "assistant"]
             if last_resp:
-                with st.spinner("Generating audio reply..."):
-                    st.session_state.last_audio_response = generate_audio_reply(last_resp[-1]["content"], language)
-                if not st.session_state.last_audio_response:
-                    st.warning("Audio reply could not be generated right now.")
+                if can_generate_audio(language):
+                    with st.spinner("Generating audio reply..."):
+                        st.session_state.last_audio_response = generate_audio_reply(last_resp[-1]["content"], language)
+                    if not st.session_state.last_audio_response:
+                        st.warning("Audio reply could not be generated right now.")
+                else:
+                    st.info("Audio reply is not available for the currently selected language yet.")
             else:
                 st.info("No assistant response available yet.")
 
@@ -1134,3 +1225,150 @@ st.markdown("""
     Built for India's Disaster Management Sector · NDMA Compliant
 </div>
 """, unsafe_allow_html=True)
+
+with tab5:
+    st.markdown("""<div class="panel-header">ALERT CENTER</div>""", unsafe_allow_html=True)
+
+    channel_status = get_alert_channel_status()
+    sms_status = channel_status.get("sms", {})
+    email_status = channel_status.get("email", {})
+
+    col_status_1, col_status_2 = st.columns(2)
+    with col_status_1:
+        st.markdown(f"""
+        <div class="data-panel">
+            <div class="panel-header">SMS CHANNEL</div>
+            <div style="font-size:0.9rem; line-height:1.9;">
+                Status: <b style="color:{'#2ecc71' if sms_status.get('configured') else '#e67e22'};">
+                    {'READY' if sms_status.get('configured') else 'NOT READY'}
+                </b><br>
+                From Number Present: <b style="color:#fff;">{sms_status.get('has_from_number')}</b><br>
+                Messaging Service SID: <b style="color:#fff;">{sms_status.get('has_messaging_service_sid')}</b>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_status_2:
+        st.markdown(f"""
+        <div class="data-panel">
+            <div class="panel-header">EMAIL CHANNEL</div>
+            <div style="font-size:0.9rem; line-height:1.9;">
+                Status: <b style="color:{'#2ecc71' if email_status.get('configured') else '#e67e22'};">
+                    {'READY' if email_status.get('configured') else 'NOT READY'}
+                </b><br>
+                SMTP Host: <b style="color:#fff;">{email_status.get('host') or 'Not set'}</b><br>
+                Port / TLS / SSL: <b style="color:#fff;">{email_status.get('port')} / {email_status.get('use_tls')} / {email_status.get('use_ssl')}</b><br>
+                Default Sender: <b style="color:#fff;">{email_status.get('default_sender') or 'Not set'}</b>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.caption("Use commas or new lines to enter multiple recipients.")
+
+    available_regions = [
+        "Kerala",
+        "Assam",
+        "Gujarat",
+        "Delhi",
+        "Odisha",
+        "Maharashtra",
+        "Uttarakhand",
+        "Himachal Pradesh",
+        "All India",
+    ]
+
+    with st.form("manual_alert_form"):
+        form_col_1, form_col_2 = st.columns(2)
+        with form_col_1:
+            manual_region = st.selectbox(
+                "Alert Region",
+                available_regions,
+                index=available_regions.index(region) if region in available_regions else 0,
+            )
+            manual_severity = st.selectbox(
+                "Severity",
+                ["RED", "HIGH", "ORANGE", "MEDIUM", "YELLOW", "LOW", "INFO"],
+                index=1,
+            )
+            manual_channels = st.multiselect("Channels", ["sms", "email"], default=["sms", "email"])
+            manual_from_name = st.text_input("Sender Name Override", value="RAKSHAK Control Room")
+            manual_from_email = st.text_input("Sender Email Override", value="")
+        with form_col_2:
+            manual_sms_recipients = st.text_area(
+                "SMS Recipients",
+                height=110,
+                placeholder="+919876543210\n+919812345678",
+            )
+            manual_email_recipients = st.text_area(
+                "Email Recipients",
+                height=110,
+                placeholder="ops@example.com\nadmin@example.com",
+            )
+        manual_message = st.text_area(
+            "Alert Message",
+            height=130,
+            placeholder="Heavy rainfall expected in low-lying areas. Keep emergency teams on standby and advise residents to avoid river crossings.",
+        )
+        send_manual_alert_btn = st.form_submit_button("SEND ALERT NOW", use_container_width=True)
+
+    if send_manual_alert_btn:
+        sms_recipients = parse_recipient_input(manual_sms_recipients)
+        email_recipients = parse_recipient_input(manual_email_recipients)
+
+        if not manual_message.strip():
+            st.error("Enter an alert message before sending.")
+        elif not manual_channels:
+            st.error("Select at least one delivery channel.")
+        else:
+            try:
+                with st.spinner("Dispatching alert..."):
+                    st.session_state.last_manual_alert = send_manual_alert(
+                        region=manual_region,
+                        message=manual_message.strip(),
+                        severity=manual_severity,
+                        channels=manual_channels,
+                        sms_recipients=sms_recipients,
+                        email_recipients=email_recipients,
+                        from_email=manual_from_email,
+                        from_name=manual_from_name,
+                    )
+                if st.session_state.last_manual_alert.get("status") == "sent":
+                    st.success("Alert sent through at least one channel.")
+                else:
+                    st.warning("Alert was processed, but no delivery succeeded. Check the delivery details below.")
+            except Exception as exc:
+                st.session_state.last_manual_alert = {"status": "failed", "error": str(exc)}
+                st.error(f"Alert dispatch failed: {exc}")
+
+    manual_result = st.session_state.get("last_manual_alert")
+    if manual_result:
+        st.markdown("""<div class="panel-header">DELIVERY RESULTS</div>""", unsafe_allow_html=True)
+        if manual_result.get("error"):
+            st.error(manual_result["error"])
+        else:
+            summary = manual_result.get("summary", {})
+            col_res_1, col_res_2 = st.columns(2)
+            with col_res_1:
+                sms_summary = summary.get("sms", {})
+                st.markdown(f"""
+                <div class="data-panel">
+                    <div class="panel-header">SMS SUMMARY</div>
+                    Attempted: <b>{sms_summary.get('attempted', 0)}</b><br>
+                    Sent: <b>{sms_summary.get('sent', 0)}</b><br>
+                    Failed: <b>{sms_summary.get('failed', 0)}</b><br>
+                    Channel State: <b>{manual_result.get('channel_status', {}).get('sms', 'not_selected')}</b>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_res_2:
+                email_summary = summary.get("email", {})
+                st.markdown(f"""
+                <div class="data-panel">
+                    <div class="panel-header">EMAIL SUMMARY</div>
+                    Attempted: <b>{email_summary.get('attempted', 0)}</b><br>
+                    Sent: <b>{email_summary.get('sent', 0)}</b><br>
+                    Failed: <b>{email_summary.get('failed', 0)}</b><br>
+                    Channel State: <b>{manual_result.get('channel_status', {}).get('email', 'not_selected')}</b>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with st.expander("Per-recipient delivery details"):
+                st.json(manual_result)
