@@ -980,10 +980,10 @@ with tab2:
         "State": ["Puducherry", "Kerala", "Assam", "Gujarat", "Delhi", "Odisha", "Maharashtra",
                   "Uttarakhand", "Himachal Pradesh", "Tamil Nadu", "Andhra Pradesh",
                   "West Bengal", "Bihar", "Uttar Pradesh", "Rajasthan", "Karnataka"],
-        "Flood Risk": [9, 9, 5, 4, 8, 7, 7, 6, 7, 7, 8, 8, 7, 3, 5],
-        "Earthquake Risk": [4, 7, 9, 8, 4, 5, 9, 9, 4, 5, 6, 6, 6, 5, 4],
-        "Cyclone Risk": [5, 3, 6, 1, 9, 5, 1, 1, 8, 8, 7, 2, 1, 1, 4],
-        "Overall Risk": [8, 8, 7, 7, 9, 7, 8, 7, 7, 7, 8, 7, 7, 4, 5],
+        "Flood Risk": [6, 9, 9, 5, 4, 8, 7, 7, 6, 7, 7, 8, 8, 7, 3, 5],
+        "Earthquake Risk": [3, 4, 7, 9, 8, 4, 5, 9, 9, 4, 5, 6, 6, 6, 5, 4],
+        "Cyclone Risk": [7, 5, 3, 6, 1, 9, 5, 1, 1, 8, 8, 7, 2, 1, 1, 4],
+        "Overall Risk": [8, 8, 8, 7, 7, 9, 7, 8, 7, 7, 7, 8, 7, 7, 4, 5],
     })
 
     col_m1, col_m2 = st.columns([2, 1])
