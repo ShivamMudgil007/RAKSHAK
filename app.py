@@ -706,7 +706,7 @@ with st.sidebar:
     st.markdown("**REGION SELECTION**")
     region = st.selectbox(
         "Region",
-        ["Kerala", "Assam", "Gujarat", "Delhi", "Odisha", "Maharashtra", "Uttarakhand", "Himachal Pradesh", "All India"],
+        ["Kerala", "Assam", "Gujarat", "Delhi", "Odisha", "Puducherry", "Uttarakhand", "Himachal Pradesh", "All India"],
         key="region_select",
         label_visibility="collapsed",
     )
@@ -1417,7 +1417,7 @@ with tab5:
         "Gujarat",
         "Delhi",
         "Odisha",
-        "Maharashtra",
+        "Puducherry",
         "Uttarakhand",
         "Himachal Pradesh",
         "All India",
