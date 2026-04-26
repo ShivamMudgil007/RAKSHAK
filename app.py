@@ -977,7 +977,7 @@ with tab2:
 
     # India state risk data
     risk_data = pd.DataFrame({
-        "State": ["Kerala", "Assam", "Gujarat", "Delhi", "Odisha", "Maharashtra",
+        "State": ["Kerala", "Assam", "Gujarat", "Delhi", "Odisha", "Puducherry", "Maharashtra",
                   "Uttarakhand", "Himachal Pradesh", "Tamil Nadu", "Andhra Pradesh",
                   "West Bengal", "Bihar", "Uttar Pradesh", "Rajasthan", "Karnataka"],
         "Flood Risk": [9, 9, 5, 4, 8, 7, 7, 6, 7, 7, 8, 8, 7, 3, 5],
